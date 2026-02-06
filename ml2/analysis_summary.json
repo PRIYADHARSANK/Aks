@@ -1,0 +1,32 @@
+{
+  "timestamp": "2026-02-06T21:30:32.474871",
+  "video_path": "WhatsApp Video 2026-02-04 at 22.10.11.mp4",
+  "center_x": 835,
+  "center_line": {
+    "start": [
+      843,
+      911
+    ],
+    "end": [
+      827,
+      0
+    ]
+  },
+  "statistics": {
+    "left_lane": {
+      "correct": 15,
+      "wrong": 4,
+      "total": 19
+    },
+    "right_lane": {
+      "correct": 53,
+      "wrong": 7,
+      "total": 60
+    },
+    "frame_count": 1620
+  },
+  "rules": {
+    "left_lane": "Vehicles should move BOTTOM to TOP",
+    "right_lane": "Vehicles should move BOTTOM to TOP"
+  }
+}

@@ -1,0 +1,20 @@
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Dependencies
+node_modules/
+__pycache__/
+.venv/
+env/
+venv/
+*.pyc
+
+# IDEs
+.vscode/
+.idea/
+
+# Backend specific
+ml2/runs/
+ml2/*.mp4

@@ -1,0 +1,14 @@
+[project]
+name = "ml2"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.4.2",
+    "opencv-python>=4.13.0.90",
+    "ultralytics>=8.4.11",
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
+    "python-multipart>=0.0.9",
+]
