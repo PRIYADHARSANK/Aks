@@ -6,6 +6,8 @@ import shutil
 import os
 import uuid
 import json
+import asyncio
+import threading
 from pathlib import Path
 from vehicle_direction_detector import VehicleDirectionDetector
 
@@ -29,6 +31,9 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 # Mount outputs so frontend can access them
 app.mount("/processed", StaticFiles(directory="processed"), name="processed")
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+# Registry to share detector instances between /stream and /detections
+active_detectors = {}
 
 @app.get("/health")
 async def health():
@@ -87,8 +92,6 @@ async def stream_processing(job_id: str):
     """
     Streams the processing of the video as an MJPEG stream.
     """
-    # Find the file associated with this job_id
-    # In a real app, use a DB. Here we scan the dir or assume naming convention
     try:
         files = list(UPLOAD_DIR.glob(f"{job_id}_*"))
         if not files:
@@ -102,16 +105,68 @@ async def stream_processing(job_id: str):
             min_movement=20
         )
         
+        # Store detector so /detections endpoint can access it
+        active_detectors[job_id] = detector
+        
         # Return MJPEG stream
-        # This will block a worker until processing is done, but gives real-time feed
+        def stream_and_cleanup():
+            try:
+                yield from detector.generate_frames()
+            finally:
+                active_detectors.pop(job_id, None)
+        
         return StreamingResponse(
-            detector.generate_frames(),
+            stream_and_cleanup(),
             media_type="multipart/x-mixed-replace; boundary=frame"
         )
         
     except Exception as e:
         print(f"Error streaming job {job_id}: {e}")
         return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
+
+@app.get("/detections/{job_id}")
+async def stream_detections(job_id: str):
+    """
+    SSE endpoint that streams wrong-way detection events in real-time.
+    Frontend connects via EventSource to receive detection IDs.
+    """
+    async def event_generator():
+        # Wait briefly for the detector to be registered by /stream
+        for _ in range(20):  # up to 2 seconds
+            if job_id in active_detectors:
+                break
+            await asyncio.sleep(0.1)
+        
+        detector = active_detectors.get(job_id)
+        if not detector:
+            yield f"data: {json.dumps({'error': 'Job not found or not started'})}\n\n"
+            return
+        
+        # Poll for new wrong-way events while detector is active
+        while job_id in active_detectors:
+            events = detector.get_new_wrong_way_events()
+            for event in events:
+                yield f"data: {json.dumps(event)}\n\n"
+            await asyncio.sleep(0.3)  # poll every 300ms
+        
+        # Flush any remaining events
+        if detector:
+            events = detector.get_new_wrong_way_events()
+            for event in events:
+                yield f"data: {json.dumps(event)}\n\n"
+        
+        # Signal completion
+        yield f"data: {json.dumps({'status': 'completed', 'stats': detector.stats if detector else {}})}\n\n"
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 if __name__ == "__main__":
     import uvicorn
