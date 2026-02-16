@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 from collections import defaultdict
 import json
+import threading
 from datetime import datetime
 
 class VehicleDirectionDetector:
@@ -53,6 +54,12 @@ class VehicleDirectionDetector:
             'right_lane': {'correct': 0, 'wrong': 0, 'total': 0},
             'frame_count': 0
         }
+        
+        # Wrong-way event tracking for SSE streaming
+        self._wrong_way_events = []
+        self._events_lock = threading.Lock()
+        self._events_cursor = 0  # tracks how many events have been read
+        self.video_fps = 30  # will be updated when video opens
         
         # Initialize YOLO model
         from ultralytics import YOLO
@@ -337,6 +344,7 @@ class VehicleDirectionDetector:
         
         # Get video properties
         fps = int(cap.get(cv2.CAP_PROP_FPS))
+        self.video_fps = fps if fps > 0 else 30
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -439,6 +447,16 @@ class VehicleDirectionDetector:
                         self.stats[lane]['correct'] += 1
                     else:
                         self.stats[lane]['wrong'] += 1
+                        # Record wrong-way event for SSE streaming
+                        event = {
+                            'track_id': int(track_id),
+                            'lane': 'Left Lane' if is_left_lane else 'Right Lane',
+                            'direction': direction,
+                            'frame_number': frame_idx,
+                            'timestamp': round(frame_idx / self.video_fps, 2)
+                        }
+                        with self._events_lock:
+                            self._wrong_way_events.append(event)
                 
                 # Draw bounding box
                 if is_correct is None:
@@ -520,6 +538,13 @@ class VehicleDirectionDetector:
         
         return self.stats
         
+    def get_new_wrong_way_events(self):
+        """Return any new wrong-way events since last call (thread-safe polling)."""
+        with self._events_lock:
+            new_events = self._wrong_way_events[self._events_cursor:]
+            self._events_cursor = len(self._wrong_way_events)
+            return new_events
+    
     def generate_frames(self):
         """Generator that processes video and yields JPEG bytes."""
         # Wrap process_video but yield JPEG encoded bytes

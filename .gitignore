@@ -18,3 +18,4 @@ venv/
 # Backend specific
 ml2/runs/
 ml2/*.mp4
+ml2/processed/*.mp4

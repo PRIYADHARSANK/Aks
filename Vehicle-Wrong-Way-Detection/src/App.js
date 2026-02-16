@@ -44,6 +44,9 @@ const WrongWayDetectionDemo = () => {
   const [processedVideoUrl, setProcessedVideoUrl] = useState(null);
   const [streamUrl, setStreamUrl] = useState(null);
   const [isLiveStreaming, setIsLiveStreaming] = useState(false);
+  const [wrongWayIds, setWrongWayIds] = useState([]);
+  const eventSourceRef = useRef(null);
+  const wrongWayPanelRef = useRef(null);
 
 
   const connectToDatabase = async () => {
@@ -243,6 +246,97 @@ const WrongWayDetectionDemo = () => {
     }
   };
 
+  const exportWrongWayJSON = () => {
+    try {
+      const now = new Date();
+      const exportData = {
+        exportInfo: {
+          exportTime: now.toISOString(),
+          systemName: 'Smart Wrong-Way Vehicle Detection System',
+          type: 'Wrong-Way Detection Report'
+        },
+        summary: {
+          totalWrongWayDetections: wrongWayIds.length
+        },
+        wrongWayDetections: wrongWayIds.map((det, idx) => ({
+          recordNumber: idx + 1,
+          vehicleTrackId: det.track_id,
+          lane: det.lane,
+          direction: det.direction,
+          frameNumber: det.frame_number,
+          videoTimestamp: `${det.timestamp}s`,
+          detectedAt: det.receivedAt
+        }))
+      };
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `wrong_way_detections_${now.getFullYear()}-${(now.getMonth() + 1).toString().padStart(2, '0')}-${now.getDate().toString().padStart(2, '0')}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setDbMessage(`✅ Exported ${wrongWayIds.length} wrong-way detections as JSON!`);
+      setTimeout(() => setDbMessage(''), 3000);
+    } catch (error) {
+      console.error('Error exporting wrong-way JSON:', error);
+      setDbMessage('❌ Error exporting data');
+      setTimeout(() => setDbMessage(''), 3000);
+    }
+  };
+
+  const exportWrongWayPDF = () => {
+    try {
+      const now = new Date();
+      const exportData = {
+        exportInfo: {
+          exportTime: now.toISOString(),
+          exportDate: now.toLocaleDateString(),
+          exportTimeFormatted: now.toLocaleTimeString(),
+          systemName: 'Smart Wrong-Way Vehicle Detection System',
+          databaseConnected: isConnected
+        },
+        summary: {
+          totalVehiclesDetected: stats.totalVehicles,
+          wrongWayVehicles: wrongWayIds.length,
+          platesRecognized: stats.platesRecognized,
+          systemAccuracy: stats.accuracy,
+          currentFPS: stats.fps
+        },
+        vehicleDetections: wrongWayIds.map((det, idx) => ({
+          recordNumber: idx + 1,
+          timestamp: det.receivedAt,
+          vehicleType: `Track ID: ${det.track_id}`,
+          licensePlate: 'N/A',
+          confidenceScore: 'N/A',
+          status: 'Wrong Direction',
+          lane: det.lane
+        })),
+        wrongWayAlerts: wrongWayIds.map((det, idx) => ({
+          alertNumber: idx + 1,
+          timestamp: `${det.timestamp}s (Frame #${det.frame_number})`,
+          lane: det.lane,
+          licensePlate: `Vehicle ID: ${det.track_id}`,
+          confidenceScore: 'N/A',
+          actionTaken: `Detected at ${det.receivedAt}`
+        }))
+      };
+      setDbMessage('Generating Wrong-Way PDF report...');
+      const success = exportToPDF(exportData);
+      if (success) {
+        setDbMessage(`✅ Wrong-Way PDF exported with ${wrongWayIds.length} detections!`);
+      } else {
+        setDbMessage('❌ Error generating PDF report');
+      }
+      setTimeout(() => setDbMessage(''), 3000);
+    } catch (error) {
+      console.error('Error exporting wrong-way PDF:', error);
+      setDbMessage('❌ Error generating PDF');
+      setTimeout(() => setDbMessage(''), 3000);
+    }
+  };
+
   const handleVideoUpload = async (e) => {
     const file = e.target.files[0];
     if (file && file.type.startsWith('video/')) {
@@ -253,8 +347,13 @@ const WrongWayDetectionDemo = () => {
       setDetections([]);
       setAlerts([]);
       setRecentDetections([]);
+      setWrongWayIds([]);
       setProcessedVideoUrl(null);
       setStreamUrl(null);
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
 
       // Auto-upload and start streaming
       await startStreaming(file);
@@ -283,11 +382,47 @@ const WrongWayDetectionDemo = () => {
       const jobId = result.job_id;
 
       // 2. Set the MJPEG stream URL
-      // This allows the browser to simply connect to the stream like an image
       setStreamUrl(`http://localhost:8000/stream/${jobId}`);
       setIsLiveStreaming(true);
       setDbMessage('⚡ Analysis Running: Streaming Real-Time Output...');
       setIsUploading(false);
+
+      // 3. Connect SSE for wrong-way detection events
+      const es = new EventSource(`http://localhost:8000/detections/${jobId}`);
+      eventSourceRef.current = es;
+
+      es.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.status === 'completed') {
+            es.close();
+            eventSourceRef.current = null;
+            return;
+          }
+          if (data.error) {
+            console.error('Detection SSE error:', data.error);
+            return;
+          }
+          // Delay showing each detection by 0.9 seconds
+          setTimeout(() => {
+            setWrongWayIds(prev => {
+              const newEntry = {
+                ...data,
+                receivedAt: new Date().toLocaleTimeString()
+              };
+              return [newEntry, ...prev];
+            });
+          }, 900);
+        } catch (err) {
+          console.error('SSE parse error:', err);
+        }
+      };
+
+      es.onerror = () => {
+        // Stream ended or errored; close gracefully
+        es.close();
+        eventSourceRef.current = null;
+      };
 
     } catch (error) {
       console.error("Error:", error);
@@ -366,6 +501,10 @@ const WrongWayDetectionDemo = () => {
   const stopStreaming = () => {
     setIsLiveStreaming(false);
     setStreamUrl(null);
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
   };
 
   const handlePlayVideoDetection = () => {
@@ -489,7 +628,12 @@ const WrongWayDetectionDemo = () => {
     setDetections([]);
     setAlerts([]);
     setRecentDetections([]);
+    setWrongWayIds([]);
     videoVehiclesRef.current = [];
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
     if (videoFileInputRef.current) {
       videoFileInputRef.current.value = '';
     }
@@ -876,6 +1020,7 @@ const WrongWayDetectionDemo = () => {
                       Pause
                     </button>
                   </div>
+
                 </div>
               ) : (
                 <canvas
@@ -909,132 +1054,142 @@ const WrongWayDetectionDemo = () => {
           </div>
 
           <div className="space-y-6">
-            <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
-              <h3 className="text-lg font-semibold mb-3 flex items-center gap-2">
-                <Activity className="w-5 h-5 text-green-400" />
-                Active Detections ({detections.length})
-              </h3>
-              <div className="space-y-2 max-h-48 overflow-y-auto">
-                {detections.length === 0 ? (
-                  <p className="text-gray-400 text-sm">No vehicles detected</p>
-                ) : (
-                  detections.map((det, idx) => (
-                    <div
-                      key={idx}
-                      className={`p-2 rounded text-sm ${det.type === 'Wrong-Way' ? 'bg-red-900/30 border border-red-700' : 'bg-gray-700'
-                        }`}
-                    >
-                      <div className="flex justify-between mb-1">
-                        <span className="font-semibold">{det.type}</span>
-                        <span className="text-gray-400">{(det.confidence * 100).toFixed(1)}%</span>
-                      </div>
-                      <div className="text-gray-400">{det.lane}</div>
-                      <div className="text-yellow-400 text-xs mt-1">
-                        {det.plate !== 'N/A' ? `Plate: ${det.plate}` : 'Plate Not Read'}
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
+            {!useVideoFile && (
+              <>
+                <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+                  <h3 className="text-lg font-semibold mb-3 flex items-center gap-2">
+                    <Activity className="w-5 h-5 text-green-400" />
+                    Active Detections ({detections.length})
+                  </h3>
+                  <div className="space-y-2 max-h-48 overflow-y-auto">
+                    {detections.length === 0 ? (
+                      <p className="text-gray-400 text-sm">No vehicles detected</p>
+                    ) : (
+                      detections.map((det, idx) => (
+                        <div
+                          key={idx}
+                          className={`p-2 rounded text-sm ${det.type === 'Wrong-Way' ? 'bg-red-900/30 border border-red-700' : 'bg-gray-700'
+                            }`}
+                        >
+                          <div className="flex justify-between mb-1">
+                            <span className="font-semibold">{det.type}</span>
+                            <span className="text-gray-400">{(det.confidence * 100).toFixed(1)}%</span>
+                          </div>
+                          <div className="text-gray-400">{det.lane}</div>
+                          <div className="text-yellow-400 text-xs mt-1">
+                            {det.plate !== 'N/A' ? `Plate: ${det.plate}` : 'Plate Not Read'}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
 
-            <div className="bg-gray-800 rounded-lg p-4 border border-red-900">
-              <h3 className="text-lg font-semibold mb-3 flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5 text-red-400" />
-                Alert Log
-              </h3>
-              <div className="space-y-2 max-h-48 overflow-y-auto">
-                {alerts.length === 0 ? (
-                  <p className="text-gray-400 text-sm">No alerts generated</p>
-                ) : (
-                  alerts.map((alert, idx) => (
-                    <div key={idx} className="p-2 bg-red-900/30 rounded text-sm border border-red-700">
-                      <div className="flex justify-between mb-1">
-                        <span className="font-semibold text-red-400">WRONG WAY</span>
-                        <span className="text-gray-400">{alert.time}</span>
-                      </div>
-                      <div className="text-gray-300">{alert.lane}</div>
-                      <div className="text-yellow-400 text-xs mt-1">Plate: {alert.plate}</div>
-                      <div className="text-gray-400 text-xs mt-1">{alert.action}</div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
+                <div className="bg-gray-800 rounded-lg p-4 border border-red-900">
+                  <h3 className="text-lg font-semibold mb-3 flex items-center gap-2">
+                    <AlertTriangle className="w-5 h-5 text-red-400" />
+                    Alert Log
+                  </h3>
+                  <div className="space-y-2 max-h-48 overflow-y-auto">
+                    {alerts.length === 0 ? (
+                      <p className="text-gray-400 text-sm">No alerts generated</p>
+                    ) : (
+                      alerts.map((alert, idx) => (
+                        <div key={idx} className="p-2 bg-red-900/30 rounded text-sm border border-red-700">
+                          <div className="flex justify-between mb-1">
+                            <span className="font-semibold text-red-400">WRONG WAY</span>
+                            <span className="text-gray-400">{alert.time}</span>
+                          </div>
+                          <div className="text-gray-300">{alert.lane}</div>
+                          <div className="text-yellow-400 text-xs mt-1">Plate: {alert.plate}</div>
+                          <div className="text-gray-400 text-xs mt-1">{alert.action}</div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         </div>
 
-        <div className="mt-6 bg-gray-800 rounded-lg p-4 border border-blue-700">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-bold flex items-center gap-2">
-              <Clock className="w-6 h-6 text-blue-400" />
-              Recent Vehicle Detections
-            </h2>
-            <button
-              onClick={exportDatabaseData}
-              className="px-4 py-2 bg-blue-600 rounded-lg hover:bg-blue-700 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Download className="w-4 h-4" />
-              Export JSON
-            </button>
-            <button
-              onClick={exportToPDFReport}
-              className="px-4 py-2 bg-green-600 rounded-lg hover:bg-green-700 flex items-center gap-2"
-            >
-              <FileJson className="w-4 h-4" />
-              Export PDF
-            </button>
-          </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-gray-700">
-                  <th className="text-left py-3 px-4 text-gray-400 font-semibold">Time</th>
-                  <th className="text-left py-3 px-4 text-gray-400 font-semibold">Vehicle Type</th>
-                  <th className="text-left py-3 px-4 text-gray-400 font-semibold">License Plate</th>
-                  <th className="text-left py-3 px-4 text-gray-400 font-semibold">Confidence</th>
-                  <th className="text-left py-3 px-4 text-gray-400 font-semibold">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recentDetections.length === 0 ? (
-                  <tr>
-                    <td colSpan="5" className="text-center py-8 text-gray-400">
-                      No detections yet. Start the simulation to see vehicle data.
-                    </td>
+
+        {/* Wrong-Way Detection IDs Section */}
+        {useVideoFile && wrongWayIds.length > 0 && (
+          <div className="mt-6 bg-gray-800 rounded-lg p-4 border border-red-700">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl font-bold flex items-center gap-2">
+                <AlertTriangle className="w-6 h-6 text-red-400 animate-pulse" />
+                Wrong-Way Detection IDs
+                <span className="bg-red-600 text-white text-xs font-bold px-3 py-1 rounded-full ml-2">
+                  {wrongWayIds.length}
+                </span>
+              </h2>
+              <div className="flex gap-2">
+                <button
+                  onClick={exportWrongWayJSON}
+                  className="px-4 py-2 bg-blue-600 rounded-lg hover:bg-blue-700 flex items-center gap-2"
+                >
+                  <Download className="w-4 h-4" />
+                  Export JSON
+                </button>
+                <button
+                  onClick={exportWrongWayPDF}
+                  className="px-4 py-2 bg-green-600 rounded-lg hover:bg-green-700 flex items-center gap-2"
+                >
+                  <FileJson className="w-4 h-4" />
+                  Export PDF
+                </button>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-gray-700">
+                    <th className="text-left py-3 px-4 text-gray-400 font-semibold">Vehicle ID</th>
+                    <th className="text-left py-3 px-4 text-gray-400 font-semibold">Lane</th>
+                    <th className="text-left py-3 px-4 text-gray-400 font-semibold">Direction</th>
+                    <th className="text-left py-3 px-4 text-gray-400 font-semibold">Video Timestamp</th>
+                    <th className="text-left py-3 px-4 text-gray-400 font-semibold">Frame #</th>
+                    <th className="text-left py-3 px-4 text-gray-400 font-semibold">Status</th>
                   </tr>
-                ) : (
-                  recentDetections.map((detection, idx) => (
+                </thead>
+                <tbody>
+                  {wrongWayIds.map((det, idx) => (
                     <tr
-                      key={idx}
+                      key={`${det.track_id}-${det.frame_number}-${idx}`}
                       className="border-b border-gray-700 hover:bg-gray-750 transition-colors"
+                      style={{
+                        animation: idx === 0 ? 'slideIn 0.4s ease-out' : 'none'
+                      }}
                     >
-                      <td className="py-3 px-4">{detection.time}</td>
-                      <td className="py-3 px-4">{detection.vehicleType}</td>
                       <td className="py-3 px-4">
-                        <span className="font-mono bg-yellow-900/30 px-2 py-1 rounded text-yellow-400">
-                          {detection.licensePlate}
+                        <span className="bg-red-600 text-white font-bold text-xs px-3 py-1 rounded-lg">
+                          ID: {det.track_id}
                         </span>
                       </td>
-                      <td className="py-3 px-4">{(detection.confidence * 100).toFixed(1)}%</td>
+                      <td className="py-3 px-4">{det.lane}</td>
                       <td className="py-3 px-4">
-                        <span
-                          className={`px-3 py-1 rounded-full text-xs font-semibold ${detection.status === 'Wrong Direction'
-                            ? 'bg-red-600 text-white'
-                            : 'bg-green-600 text-white'
-                            }`}
-                        >
-                          {detection.status}
+                        <span className="font-mono bg-yellow-900/30 px-2 py-1 rounded text-yellow-400">
+                          {det.direction}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4 font-mono">{det.timestamp}s</td>
+                      <td className="py-3 px-4">#{det.frame_number}</td>
+                      <td className="py-3 px-4">
+                        <span className="px-3 py-1 rounded-full text-xs font-semibold bg-red-600 text-white">
+                          ⚠️ Wrong Way
                         </span>
                       </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
+        )}
 
         <div className="mt-6 bg-gray-800 rounded-lg p-4 border border-gray-700">
           <h3 className="font-semibold mb-2">About This Demo</h3>
